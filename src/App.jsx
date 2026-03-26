@@ -18,12 +18,18 @@ const App = () => {
   const [fsdText, setFsdText] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  const [scanStatus, setScanStatus] = useState(''); // Text like "Extracting text...", "Deep OCR Scanning..."
+  const [scanStatus, setScanStatus] = useState(''); 
   const [testCases, setTestCases] = useState(null);
   const [activeFilter, setActiveFilter] = useState('all');
   const [scannedFile, setScannedFile] = useState(null);
   const [notification, setNotification] = useState(null);
+  const [engine, setEngine] = useState('regex');
+  const [apiKey, setApiKey] = useState(localStorage.getItem('geminiApiKey') || '');
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    if (apiKey) localStorage.setItem('geminiApiKey', apiKey);
+  }, [apiKey]);
 
   useEffect(() => {
     if (notification) {
@@ -116,54 +122,169 @@ const App = () => {
     }
   };
 
-  const generateTestCases = (textToProcess = fsdText) => {
-    if (!textToProcess.trim()) return;
-    setIsGenerating(true);
+  const generateWithLLM = async (text, key) => {
+    const prompt = `You are an expert QA Engineer. Extract comprehensive test cases from the following Functional Specification Document. Identify positive, negative, and edge cases.\n\nDocument:\n${text.substring(0, 30000)}`;
     
-    setTimeout(() => {
-      const generated = interpretFSD(textToProcess);
-      setTestCases(generated);
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                no: { type: "INTEGER" },
+                id: { type: "STRING" },
+                title: { type: "STRING" },
+                type: { type: "STRING", description: "positive or negative" },
+                severity: { type: "STRING", description: "Low, Medium, High, or Critical" },
+                description: { type: "STRING" },
+                steps: { type: "ARRAY", items: { type: "STRING" } },
+                expected: { type: "STRING" }
+              },
+              required: ["no", "id", "title", "type", "severity", "description", "steps", "expected"]
+            }
+          }
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error?.message || "Failed to generate AI tests.");
+    }
+
+    const data = await response.json();
+    return JSON.parse(data.candidates[0].content.parts[0].text);
+  };
+
+  const generateTestCases = async (textToProcess = fsdText) => {
+    if (!textToProcess.trim()) return;
+    
+    if (engine === 'llm' && !apiKey.trim()) {
+      setNotification({ type: 'error', message: 'API Key is required for AI Semantic Engine.' });
+      return;
+    }
+
+    setIsGenerating(true);
+    setScanStatus(engine === 'llm' ? 'AI synthesizing test scenarios...' : 'Running local regex extractor...');
+    
+    try {
+      if (engine === 'llm') {
+        const generated = await generateWithLLM(textToProcess, apiKey);
+        setTestCases(generated);
+        setNotification({ type: 'success', message: `AI Generated ${generated.length} test cases!` });
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 800)); // smooth UI transition
+        const generated = interpretFSD(textToProcess);
+        setTestCases(generated);
+        setNotification({ type: 'success', message: `Regex Extracted ${generated.length} test cases!` });
+      }
+    } catch (err) {
+      console.error(err);
+      setNotification({ type: 'error', message: `Generation failed: ${err.message}` });
+    } finally {
       setIsGenerating(false);
-      setNotification({ type: 'success', message: `Test Suite Generated (${generated.length} cases)` });
-    }, 1500);
+      setScanStatus('');
+    }
   };
 
   const interpretFSD = (text) => {
     const cases = [];
-    const lowerText = text.toLowerCase();
     
     const createCase = (title, type, severity, description, steps, expected) => ({
       no: cases.length + 1, id: `TC-${cases.length + 101}`, title, type, severity, description, steps, expected, actual: ""
     });
 
-    if (lowerText.includes('login') || lowerText.includes('credential')) {
-      cases.push(createCase('Login Access Control', 'positive', 'Critical', 'Verify main login flow.', ['Navigate to login', 'Enter credentials', 'Click Login'], 'User hits Dashboard.'));
-      cases.push(createCase('Wrong Password Rejection', 'negative', 'High', 'Security check.', ['Enter wrong password', 'Submit'], 'Access denied message.'));
-    }
+    // Clean up text format: standardize newlines and remove excessive spaces
+    const cleanText = text.replace(/\r\n/g, '\n').replace(/\t/g, ' ').replace(/\n\s*\n/g, '\n');
+    
+    // Split into sentences using punctuation or newlines
+    const segments = cleanText.split(/(?:\n|\.\s+|\?\s+|!\s+)/).map(s => s.trim()).filter(s => s.length > 15);
 
-    if (lowerText.includes('mandatory') || lowerText.includes('required') || lowerText.includes('field')) {
-      cases.push(createCase('Form Field Validation', 'negative', 'Medium', 'Mandatory check.', ['Leave fields empty', 'Click Submit'], 'Valiation errors shown.'));
-    }
+    const reqKeywords = ['must', 'shall', 'should', 'will', 'required', 'mandatory', 'validate', 'error', 'fail', 'able to', 'can', 'allow', 'user can', 'system shall', 'if', 'when', 'maximum', 'minimum', 'limit', 'wajib', 'harus', 'bisa', 'dapat', 'akan', 'validasi', 'gagal', 'maksimal', 'minimal', 'batas', 'ketika', 'jika'];
+    
+    const negativeKeywords = ['error', 'fail', 'invalid', 'reject', 'not allowed', 'cannot', 'must not', 'exceed', 'prevent', 'gagal', 'salah', 'tidak valid', 'ditolak', 'tidak boleh', 'jangan', 'melebihi', 'mencegah'];
+    
+    const highSeverityKeywords = ['login', 'password', 'payment', 'transaction', 'security', 'role', 'admin', 'database', 'access', 'auth', 'pembayaran', 'transaksi', 'keamanan', 'akses'];
 
-    if (lowerText.includes('amount') || lowerText.includes('nominal')) {
-      cases.push(createCase('Input Amount Integrity', 'positive', 'High', 'Verify financial amount input handling.', ['Enter valid numerical amount', 'Submit the form'], 'Amount is processed correctly.'));
-      cases.push(createCase('Invalid Amount Rejection', 'negative', 'High', 'Boundary validation.', ['Enter negative amount or text', 'Submit'], 'Validation error triggers.'));
-    }
+    const extracted = new Set(); 
 
-    if (lowerText.includes('email')) {
-      cases.push(createCase('Email Format Integrity', 'negative', 'Medium', 'Pattern check.', ['Enter improper email', 'Submit'], 'Syntax error alert.'));
-    }
+    segments.forEach(segment => {
+      const lowerSeg = segment.toLowerCase();
+      
+      // Check if this segment looks like a requirement
+      const isReq = reqKeywords.some(kw => lowerSeg.includes(kw));
+      if (!isReq) return;
 
-    if (lowerText.includes('admin') || lowerText.includes('role')) {
-      cases.push(createCase('Role-Based Access', 'negative', 'High', 'Permission check.', ['Visit admin URL as regular user'], '403 Forbidden shown.'));
-    }
+      // Avoid very long paragraphs as a single test case
+      if (segment.length > 250) return;
 
-    if (lowerText.includes('upload')) {
-       cases.push(createCase('File Size Constraint', 'negative', 'Medium', 'Limit check.', ['Select large file (>5MB)', 'Upload'], 'Rejection notice.'));
+      // Skip if already extracted a similar one
+      if (extracted.has(lowerSeg)) return;
+      extracted.add(lowerSeg);
+
+      // Determine Type
+      const isNegative = negativeKeywords.some(kw => lowerSeg.includes(kw));
+      const type = isNegative ? 'negative' : 'positive';
+
+      // Determine Severity
+      const isCritical = highSeverityKeywords.some(kw => lowerSeg.includes(kw));
+      const severity = isCritical ? 'Critical' : (isNegative ? 'High' : 'Medium');
+
+      // Generate Title (first 6-8 words)
+      const words = segment.split(' ');
+      const title = words.slice(0, 7).join(' ') + (words.length > 7 ? '...' : '');
+      const cleanTitle = title.charAt(0).toUpperCase() + title.slice(1);
+
+      // Generating contextual steps based on the text
+      let stepsArray = ['1. Setup initial condition or prerequisite.'];
+      if(lowerSeg.includes("click") || lowerSeg.includes("button") || lowerSeg.includes("tombol") || lowerSeg.includes("klik")) {
+         stepsArray.push("2. Action: Click the designated button/element.");
+      } else if(lowerSeg.includes("enter") || lowerSeg.includes("input") || lowerSeg.includes("masukkan") || lowerSeg.includes("isi")) {
+         stepsArray.push("2. Action: Input the required test data.");
+      } else {
+         stepsArray.push("2. Action: Trigger the process described.");
+      }
+      stepsArray.push("3. Verify the system's reaction.");
+
+      cases.push(createCase(
+        cleanTitle, 
+        type, 
+        severity, 
+        `Requirement: ${segment}`, 
+        stepsArray, 
+        `System behaves as described: "${segment}"`
+      ));
+    });
+
+    // Fallback parser if natural sentences weren't well formed (e.g. lists or bullet points)
+    if (cases.length === 0) {
+       const lines = cleanText.split('\n').map(l => l.trim()).filter(l => l.length > 10);
+       lines.forEach(line => {
+           // Check if it's a list item starting with a number, dash, or bullet
+           if (line.match(/^[-*•\d+.)]/)) { 
+               const cleanLine = line.replace(/^[-*•\d+.)]\s*/, '');
+               if(cleanLine.length < 15) return;
+               cases.push(createCase(
+                 cleanLine.substring(0, 40) + "...", 
+                 'positive', 
+                 'Medium', 
+                 `List Item Requirement: ${cleanLine}`, 
+                 ['1. Prepare to test list item.', '2. Execute action.', '3. Verify result.'], 
+                 'Condition is successfully met.'
+               ));
+           }
+       });
     }
 
     if (cases.length === 0) {
-      cases.push(createCase('Base Functional Test', 'positive', 'High', 'Verify primary spec dynamically generated from OCR text.', ['Execute main feature described in document'], 'Successful completion.'));
+      cases.push(createCase('Base Functional Test', 'positive', 'High', 'Verify primary spec generated from OCR text.', ['Execute main feature described in document'], 'Successful completion.'));
     }
 
     return cases;
@@ -204,6 +325,49 @@ const App = () => {
       </header>
 
       <main style={{ maxWidth: '1000px', margin: '0 auto', display: 'grid', gap: '2.5rem' }}>
+        
+        <section className="glass glass-card" style={{ padding: '1.5rem 2.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+             <div className="section-title" style={{ margin: 0, fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Layers color="var(--primary)" size={20} /> Engine Configuration
+             </div>
+             <div style={{ display: 'flex', gap: '10px', background: 'rgba(255,255,255,0.05)', padding: '5px', borderRadius: '12px' }}>
+                <button 
+                   onClick={() => setEngine('regex')} 
+                   style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: engine === 'regex' ? 'var(--primary)' : 'transparent', color: engine === 'regex' ? 'white' : 'var(--text-muted)', fontWeight: '600', transition: 'all 0.2s' }}>
+                   Local Regex
+                </button>
+                <button 
+                   onClick={() => setEngine('llm')} 
+                   style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: engine === 'llm' ? 'linear-gradient(135deg, #10b981, #059669)' : 'transparent', color: engine === 'llm' ? 'white' : 'var(--text-muted)', fontWeight: '600', transition: 'all 0.2s' }}>
+                   AI Semantic
+                </button>
+             </div>
+          </div>
+          
+          <AnimatePresence>
+             {engine === 'llm' && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} style={{ overflow: 'hidden' }}>
+                   <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem', alignItems: 'center' }}>
+                      <input 
+                         type="password" 
+                         placeholder="Enter Google Gemini API Key" 
+                         value={apiKey} 
+                         onChange={(e) => setApiKey(e.target.value)}
+                         style={{ flex: 1, padding: '12px 15px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.2)', color: 'white', fontFamily: 'monospace' }}
+                      />
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ padding: '12px 20px', fontSize: '0.9rem', whiteSpace: 'nowrap' }}>
+                         Get API Key
+                      </a>
+                   </div>
+                   <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '10px' }}>
+                     * Your API key is stored locally in your browser and is only sent directly to Google's API.
+                   </div>
+                </motion.div>
+             )}
+          </AnimatePresence>
+        </section>
+
         <section className="glass glass-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div className="section-title" style={{ margin: 0 }}>
