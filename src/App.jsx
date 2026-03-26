@@ -205,26 +205,18 @@ const App = () => {
 
       <main style={{ maxWidth: '1000px', margin: '0 auto', display: 'grid', gap: '2.5rem' }}>
         <section className="glass glass-card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div className="section-title" style={{ margin: 0 }}>
-              {isScanning ? <Loader2 className="animate-spin" color="var(--primary)" /> : <FileSearch color="var(--primary)" />}
-              {isScanning ? scanStatus || `Analyzing ${scannedFile}...` : "Requirement Scan Engine"}
+              {(isScanning || isGenerating) ? <Loader2 className="animate-spin" color="var(--primary)" /> : <FileSearch color="var(--primary)" />}
+              {isScanning ? scanStatus || `Analyzing ${scannedFile}...` : isGenerating ? "Generating Test Cases..." : "Requirement Scan Engine"}
             </div>
-            <div style={{ display: 'flex', gap: '1rem' }}>
+            <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+               {scannedFile && !isScanning && !isGenerating && <div style={{ marginRight: '1rem', display: 'flex', alignItems: 'center', gap: '10px', color: '#10b981', background: 'rgba(16, 185, 129, 0.08)', padding: '8px 18px', borderRadius: '100px', fontSize: '0.9rem', border: '1px solid rgba(16, 185, 129, 0.2)' }}><CheckCircle size={16} /> Ready: {scannedFile}</div>}
                <input type="file" ref={fileInputRef} style={{ display: 'none' }} accept=".pdf,.docx,.txt" onChange={handleFileUpload} />
-               <button className="btn btn-secondary" onClick={() => fileInputRef.current.click()} disabled={isScanning}>
+               <button className="btn btn-secondary" onClick={() => fileInputRef.current.click()} disabled={isScanning || isGenerating}>
                  <Upload size={18} /> Upload Scanned PDF
                </button>
             </div>
-          </div>
-
-          <textarea placeholder="Extracted text from OCR or standard docs will appear here." value={fsdText} onChange={(e) => setFsdText(e.target.value)}></textarea>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1.5rem', alignItems: 'center' }}>
-             {scannedFile && !isScanning && <div style={{ marginRight: 'auto', display: 'flex', alignItems: 'center', gap: '10px', color: '#10b981', background: 'rgba(16, 185, 129, 0.08)', padding: '8px 18px', borderRadius: '100px', fontSize: '0.9rem', border: '1px solid rgba(16, 185, 129, 0.2)' }}><CheckCircle size={16} /> Ready: {scannedFile}</div>}
-             <button className="btn btn-primary" onClick={() => generateTestCases()} disabled={isGenerating || isScanning || !fsdText}>
-               {isGenerating ? <><Loader2 className="animate-spin" size={18} /> Generating Suite...</> : <><Zap size={18} fill="currentColor" /> Generate Suite</>}
-             </button>
           </div>
         </section>
 
